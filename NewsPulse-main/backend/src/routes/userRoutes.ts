@@ -4,7 +4,7 @@ import User from "../models/User";
 
 const router = Router();
 
-router.post("/register",async(req,res) => {
+router.post("/",async(req,res) => {
     try{
         const user = new User(req.body);
         await user.save();
@@ -16,6 +16,33 @@ router.post("/register",async(req,res) => {
     catch(err){
         res.status(400).json({
             error: "User creation failed", details: err
+        });
+    }
+});
+
+router.post("/login", async(req,res) => {
+    try{
+        const { email, password } = req.body;
+        
+        if (!email || !password) {
+            return res.status(400).json({
+                error: "Email and password are required"
+            });
+        }
+
+        const user = await User.findOne({ email, password });
+        
+        if (!user) {
+            return res.status(401).json({
+                error: "Invalid email or password"
+            });
+        }
+
+        res.json(user);
+    }
+    catch(err){
+        res.status(500).json({
+            error: "Login failed", details: err
         });
     }
 });

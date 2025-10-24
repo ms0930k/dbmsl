@@ -1,8 +1,11 @@
 import { Router } from "express";
-import { sendTestMessage } from "../controllers/telegramController";
+import { sendTestMessage, sendInstantNews } from "../controllers/telegramController";
 import User from "../models/User";
 import bot from "../services/telegramService";
 import { fetchAndScheduleForUser } from "../services/userNewsService";
+import { fetchNewsCategory } from "../services/newsApiService";
+import { sendTelegramMessage } from "../services/telegramService";
+import { escapeTelegramMarkdown } from "../controllers/telegramHelper";
 
 const router = Router();
 
@@ -36,6 +39,12 @@ bot.onText(/\/start/, async (msg) => {
           inline_keyboard: [
             [
               {
+                text: "📰 Get Instant News",
+                callback_data: "instant_news",
+              },
+            ],
+            [
+              {
                 text: "📂 Change Categories",
                 callback_data: "change_categories",
               },
@@ -61,10 +70,92 @@ bot.onText(/\/start/, async (msg) => {
     // New user → ask for email
     await bot.sendMessage(
       chatId,
-      "👋 Welcome to NewsPulse! Please enter your email to register:"
+      "👋 Welcome to News93! Please enter your email to register:"
     );
     userSteps[chatId] = "awaiting_email";
   }
+});
+
+// /news command handler for instant news
+bot.onText(/\/news/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const user = await User.findOne({ telegram_id: chatId.toString() });
+
+  if (!user) {
+    return bot.sendMessage(
+      chatId,
+      "⚠️ You need to register first. Please use /start to begin."
+    );
+  }
+
+  if (!user.category || user.category.length === 0) {
+    return bot.sendMessage(
+      chatId,
+      "⚠️ You haven't selected any news categories yet. Please use /start to configure your preferences."
+    );
+  }
+
+  // Send loading message
+  const loadingMsg = await bot.sendMessage(chatId, "🔄 Fetching latest news for you...");
+
+  try {
+    let newsCount = 0;
+    const maxNewsPerCategory = 2; // Limit to avoid spam
+
+    for (const category of user.category) {
+      try {
+        const newsList = await fetchNewsCategory(category);
+        const limitedNews = newsList.slice(0, maxNewsPerCategory);
+
+        for (const news of limitedNews) {
+          const message = `📰 *${escapeTelegramMarkdown(category.toUpperCase())}*\n\n${escapeTelegramMarkdown(news.title)}\n\n${escapeTelegramMarkdown(news.summary_text)}\n\n🔗 [Read More](${escapeTelegramMarkdown(news.source_url)})`;
+          
+          await sendTelegramMessage(chatId, message);
+          newsCount++;
+        }
+      } catch (error) {
+        console.error(`Error fetching news for category ${category}:`, error);
+      }
+    }
+
+    // Update loading message with success
+    await bot.editMessageText(
+      `✅ Found and sent ${newsCount} news articles!`,
+      { chat_id: chatId, message_id: loadingMsg.message_id }
+    );
+
+  } catch (error) {
+    console.error("Error in /news command:", error);
+    await bot.editMessageText(
+      "❌ Sorry, there was an error fetching news. Please try again later.",
+      { chat_id: chatId, message_id: loadingMsg.message_id }
+    );
+  }
+});
+
+// /help command handler
+bot.onText(/\/help/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const helpText = `🤖 *News93 Bot Commands*
+
+/start - Register or manage your account
+/news - Get instant news from your selected categories
+/help - Show this help message
+
+*Features:*
+• 📰 Get personalized news based on your interests
+• ⏰ Scheduled daily news delivery
+• 🔔 Multiple delivery methods (Telegram, Email, Both)
+• 📂 Customizable news categories
+
+*Categories available:*
+${categories.map(cat => `• ${cat}`).join('\n')}
+
+Need help? Contact support or use /start to configure your preferences.`;
+
+  await bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
 });
 
 // Handle messages for multi-step registration
@@ -169,6 +260,60 @@ bot.on("callback_query", async (query) => {
     }
   };
 
+  // Instant news handler
+  if (data === "instant_news") {
+    const user = await User.findOne({ telegram_id: chatId.toString() });
+    
+    if (!user) {
+      await bot.sendMessage(chatId, "⚠️ You need to register first. Please use /start to begin.");
+      return safeAnswerCallback(query.id, "Please register first");
+    }
+
+    if (!user.category || user.category.length === 0) {
+      await bot.sendMessage(chatId, "⚠️ You haven't selected any news categories yet. Please use /start to configure your preferences.");
+      return safeAnswerCallback(query.id, "Configure categories first");
+    }
+
+    // Send loading message
+    const loadingMsg = await bot.sendMessage(chatId, "🔄 Fetching latest news for you...");
+
+    try {
+      let newsCount = 0;
+      const maxNewsPerCategory = 2; // Limit to avoid spam
+
+      for (const category of user.category) {
+        try {
+          const newsList = await fetchNewsCategory(category);
+          const limitedNews = newsList.slice(0, maxNewsPerCategory);
+
+          for (const news of limitedNews) {
+            const message = `📰 *${escapeTelegramMarkdown(category.toUpperCase())}*\n\n${escapeTelegramMarkdown(news.title)}\n\n${escapeTelegramMarkdown(news.summary_text)}\n\n🔗 [Read More](${escapeTelegramMarkdown(news.source_url)})`;
+            
+            await sendTelegramMessage(chatId, message);
+            newsCount++;
+          }
+        } catch (error) {
+          console.error(`Error fetching news for category ${category}:`, error);
+        }
+      }
+
+      // Update loading message with success
+      await bot.editMessageText(
+        `✅ Found and sent ${newsCount} news articles!`,
+        { chat_id: chatId, message_id: loadingMsg.message_id }
+      );
+
+    } catch (error) {
+      console.error("Error in instant news callback:", error);
+      await bot.editMessageText(
+        "❌ Sorry, there was an error fetching news. Please try again later.",
+        { chat_id: chatId, message_id: loadingMsg.message_id }
+      );
+    }
+
+    return safeAnswerCallback(query.id, "News sent!");
+  }
+
   // Toggle categories
   if (data.startsWith("toggle_")) {
     const category = data.replace("toggle_", "");
@@ -255,11 +400,12 @@ bot.on("callback_query", async (query) => {
       { telegram_id: chatId.toString() },
       { subscription_status: false }
     );
-    await bot.sendMessage(chatId, "❌ You have been unsubscribed from NewsPulse.");
+    await bot.sendMessage(chatId, "❌ You have been unsubscribed from News93.");
     return safeAnswerCallback(query.id);
   }
 });
 
 router.post("/test", sendTestMessage);
+router.post("/instant-news", sendInstantNews);
 
 export default router;

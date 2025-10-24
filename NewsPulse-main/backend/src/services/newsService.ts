@@ -37,6 +37,12 @@ export async function fetchAndScheduleNews(forUserId?: string) {
           if (!existingSchedule) {
             const sendTime = new Date();
             sendTime.setHours(hour ?? 9, minute ?? 0, 0, 0);
+            
+            // If the scheduled time has already passed today, schedule for tomorrow
+            const now = new Date();
+            if (sendTime <= now) {
+              sendTime.setDate(sendTime.getDate() + 1);
+            }
 
             await NewsScheduler.create({
               user_id: user._id,
